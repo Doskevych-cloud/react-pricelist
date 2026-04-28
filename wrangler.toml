@@ -1,0 +1,21 @@
+name = "react-pricelist"
+main = "src/worker.js"
+compatibility_date = "2024-09-01"
+workers_dev = true
+
+# KV для кешу JSON-відповідей upstream (price-api). 7d TTL.
+# id заповнюємо після `wrangler kv:namespace create CACHE`.
+[[kv_namespaces]]
+binding = "KV"
+id = "43f3944ceae14436b969d5853022c881"
+
+# Service binding на основний worker — щоб обійти CF loop guard (error 1042),
+# який спрацьовує коли worker звертається до іншого worker по HTTP в межах
+# одного акаунту. Service binding робить це in-process, без HTTP edge.
+[[services]]
+binding = "UPSTREAM"
+service = "price-api"
+
+# Cron щогодини на 7й хвилині (зміщення від основного worker'а — 5 2 * * *).
+[triggers]
+crons = ["7 * * * *"]

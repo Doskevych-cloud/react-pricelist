@@ -1,0 +1,11 @@
+{
+  "name": "react-pricelist",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Public price-list backend for react.ink — thin cache-proxy over price-api",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "dev": "wrangler dev"
+  }
+}
