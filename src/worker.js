@@ -25,7 +25,9 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type': 'application/json; charset=utf-8',
-  'Cache-Control': 'public, max-age=60',
+  // no-store — щоб після ручного _refresh або cron'а оновлення цін відразу
+  // дотягувалося до браузера. KV-кеш на сервері все одно є (TTL 7d).
+  'Cache-Control': 'no-store, must-revalidate',
 };
 
 function json(body, status = 200) {
