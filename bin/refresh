@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Прогріти кеш react-pricelist на льоту (після правок цін у 1С).
+# Секрет читається з macOS Keychain, не з env / history.
+set -euo pipefail
+
+SECRET=$(security find-generic-password -s "react-pricelist-refresh-secret" -w 2>/dev/null) || {
+  echo "✗ secret not in Keychain. Set up:" >&2
+  echo "  security add-generic-password -s react-pricelist-refresh-secret -a \"\$USER\" -w '<secret>'" >&2
+  exit 1
+}
+
+curl -sw "\nHTTP %{http_code} · %{time_total}s\n" \
+  "https://react-pricelist.doskevich.workers.dev/?action=_refresh&secret=${SECRET}"

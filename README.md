@@ -30,6 +30,15 @@ cd /Users/dmitriydoskevich/Desktop/код/react-pricelist
 npx wrangler deploy
 ```
 
+## Прогріти кеш після правок у 1С
+
+```bash
+./bin/refresh
+```
+
+Скрипт читає секрет з macOS Keychain (`react-pricelist-refresh-secret`), не з
+env / history.
+
 ## Перший запуск
 
 ```bash
@@ -37,14 +46,17 @@ npx wrangler deploy
 npx wrangler kv:namespace create CACHE
 # скопіювати id у wrangler.toml
 
-# 2. Set admin secret для _refresh
-npx wrangler secret put REFRESH_SECRET
+# 2. Згенерувати секрет, зберегти в Keychain і Cloudflare одночасно
+SECRET=$(openssl rand -hex 32)
+security add-generic-password -s react-pricelist-refresh-secret -a "$USER" -w "$SECRET" -U
+echo "$SECRET" | npx wrangler secret put REFRESH_SECRET
+unset SECRET
 
 # 3. Deploy
 npx wrangler deploy
 
-# 4. Прогріти кеш одразу (інакше перший запит читач триггерить live fetch)
-curl "https://react-pricelist.doskevich.workers.dev/?action=_refresh&secret=$YOUR_SECRET"
+# 4. Прогріти кеш одразу
+./bin/refresh
 ```
 
 ## Cron
