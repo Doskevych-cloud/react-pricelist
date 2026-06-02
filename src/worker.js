@@ -5,7 +5,7 @@
 //
 // Endpoints:
 //   GET /?action=price_list_get&pt_no=...&pt_with=...
-//   GET /?action=fx_swift
+//   GET /?action=fx_nbu
 //
 // Cron щогодини оновлює обидва ключі. Якщо upstream падає, віддаємо stale-кеш.
 // =============================================================================
@@ -20,14 +20,21 @@ const UPSTREAM_HOST = 'https://price-api.internal';
 const PT_NO_VAT   = '36084004-bfb6-11f0-86f2-107c6149f3d7';
 const PT_WITH_VAT = '6a417c18-3eec-11f1-870a-107c6149f3d7';
 
+// Edge-кеш TTL. Прайс міняється раз на день (cron з 1С) або по кнопці «Оновити»
+// в адмінці; курс НБУ — раз на день зранку. Тому віддаємо з edge-кешу Cloudflare
+// (безкоштовний, НЕ рахується в KV-ліміт) і чіпаємо KV лише на edge-miss.
+// 5 хв — стеля глобального розсинхрону після кнопки (Cache API per-colo, тож для
+// решти регіонів покладаємось на короткий max-age). 99% переглядів → 0 KV reads.
+const EDGE_TTL = 300; // 5 хв
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type': 'application/json; charset=utf-8',
-  // no-store — щоб після ручного _refresh або cron'а оновлення цін відразу
-  // дотягувалося до браузера. KV-кеш на сервері все одно є (TTL 7d).
-  'Cache-Control': 'no-store, must-revalidate',
+  // public + max-age → браузер і Cloudflare edge кешують відповідь. Інвалідація —
+  // cache.delete() у refreshAll (кнопка _refresh / cron) скидає edge негайно.
+  'Cache-Control': `public, max-age=${EDGE_TTL}`,
 };
 
 function json(body, status = 200) {
@@ -37,6 +44,11 @@ function json(body, status = 200) {
 
 function priceListKey(ptNo, ptWith) {
   return `price_list_get_${ptNo || 'auto'}_${ptWith || 'auto'}`;
+}
+
+// Синтетичний стабільний Request-ключ для Cache API (edge-кеш адресується по URL).
+function edgeKey(kvKey) {
+  return new Request(`https://react-pricelist.cache/${kvKey}`);
 }
 
 async function fetchUpstream(env, path) {
@@ -61,21 +73,34 @@ async function fetchUpstream(env, path) {
   }
 }
 
-async function getOrFetch(env, kvKey, upstreamPath) {
-  // 1) Cache hit → відразу.
-  const cached = await env.KV.get(kvKey);
-  if (cached) return json(cached);
+async function getOrFetch(env, ctx, kvKey, upstreamPath) {
+  const cache = caches.default;
+  const ck = edgeKey(kvKey);
 
-  // 2) Cache miss → live fetch.
-  const fresh = await fetchUpstream(env, upstreamPath);
-  if (fresh) {
-    // 7d TTL — cron оновлює щогодини, але якщо cron падає, маємо stale-fallback.
-    await env.KV.put(kvKey, fresh, { expirationTtl: 7 * 24 * 3600 });
-    return json(fresh);
+  // 0) Edge hit → 0 KV reads (основний шлях для публічного трафіку).
+  const hit = await cache.match(ck);
+  if (hit) {
+    const r = new Response(hit.body, hit);
+    r.headers.set('X-Cache', 'HIT');
+    return r;
   }
 
-  // 3) Upstream down + кешу немає.
-  return json({ error: 'upstream unavailable, no cache' }, 503);
+  // 1) Edge miss → KV.
+  let body = await env.KV.get(kvKey);
+
+  // 2) KV miss → live fetch + засів KV (7d stale-fallback на випадок падіння cron).
+  if (!body) {
+    const fresh = await fetchUpstream(env, upstreamPath);
+    if (!fresh) return json({ error: 'upstream unavailable, no cache' }, 503);
+    await env.KV.put(kvKey, fresh, { expirationTtl: 7 * 24 * 3600 });
+    body = fresh;
+  }
+
+  const res = json(body);
+  res.headers.set('X-Cache', 'MISS');
+  // Засіяти edge — наступні запити в цьому colo не торкнуться KV до EDGE_TTL.
+  ctx.waitUntil(cache.put(ck, res.clone()));
+  return res;
 }
 
 async function refreshAll(env) {
@@ -85,16 +110,19 @@ async function refreshAll(env) {
       path: `/?action=price_list_get&pt_no=${encodeURIComponent(PT_NO_VAT)}&pt_with=${encodeURIComponent(PT_WITH_VAT)}`,
     },
     {
-      kvKey: 'fx_swift',
-      path: '/?action=fx_swift',
+      kvKey: 'fx_nbu',
+      path: '/?action=fx_nbu',
     },
   ];
 
+  const cache = caches.default;
   const results = [];
   for (const t of tasks) {
     const fresh = await fetchUpstream(env, t.path);
     if (fresh) {
       await env.KV.put(t.kvKey, fresh, { expirationTtl: 7 * 24 * 3600 });
+      // Скинути edge-кеш ключа → нова ціна/курс підхопляться одразу (у цьому colo).
+      await cache.delete(edgeKey(t.kvKey));
       results.push({ key: t.kvKey, ok: true, size: fresh.length });
     } else {
       results.push({ key: t.kvKey, ok: false });
@@ -108,7 +136,7 @@ export default {
     ctx.waitUntil(refreshAll(env));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS_HEADERS });
     }
@@ -123,11 +151,11 @@ export default {
       const ptNo = url.searchParams.get('pt_no');
       const ptWith = url.searchParams.get('pt_with');
       const path = `/?action=price_list_get&pt_no=${encodeURIComponent(ptNo || '')}&pt_with=${encodeURIComponent(ptWith || '')}`;
-      return await getOrFetch(env, priceListKey(ptNo, ptWith), path);
+      return await getOrFetch(env, ctx, priceListKey(ptNo, ptWith), path);
     }
 
-    if (action === 'fx_swift') {
-      return await getOrFetch(env, 'fx_swift', '/?action=fx_swift');
+    if (action === 'fx_nbu') {
+      return await getOrFetch(env, ctx, 'fx_nbu', '/?action=fx_nbu');
     }
 
     // Manual refresh — admin-only через ?secret=. Корисно після правок прайсу
@@ -145,13 +173,13 @@ export default {
       const ptKey = priceListKey(PT_NO_VAT, PT_WITH_VAT);
       const [pl, fx] = await Promise.all([
         env.KV.get(ptKey),
-        env.KV.get('fx_swift'),
+        env.KV.get('fx_nbu'),
       ]);
       return json({
         ok: true,
         cache: {
           price_list_get: pl ? `${pl.length} bytes` : 'empty',
-          fx_swift: fx ? `${fx.length} bytes` : 'empty',
+          fx_nbu: fx ? `${fx.length} bytes` : 'empty',
         },
       });
     }
