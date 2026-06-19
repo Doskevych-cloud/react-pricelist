@@ -16,6 +16,12 @@ id = "43f3944ceae14436b969d5853022c881"
 binding = "UPSTREAM"
 service = "price-api"
 
+# Service binding на react-bot — для відправки заявок дилера (react.ink/verify)
+# у Telegram. Токен бота тут не тримаємо; сам бот шле через свій _notify_dealer.
+[[services]]
+binding = "BOT"
+service = "react-bot"
+
 # Cron — щогодини. refreshAll прогріває лише price_list (раз на день з 1С) та
 # fx_nbu (раз на день зранку), тож 15-хв смикання upstream було марним. Щогодинний
 # тригер покриває і ранкові години (06/07/08 UTC), коли банк публікує курс.
